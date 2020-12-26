@@ -18,6 +18,10 @@ var ErrUnsupportedValue = errors.New("unsupported value")
 type Coercion func(*ImageOptions, interface{}) error
 
 var paramTypeCoercions = map[string]Coercion{
+	"w":     	   coerceWidth,
+	"h":           coerceHeight,
+	"mw":     	   coerceWidth,
+	"mh":          coerceHeight,
 	"width":       coerceWidth,
 	"height":      coerceHeight,
 	"quality":     coerceQuality,
