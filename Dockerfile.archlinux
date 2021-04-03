@@ -1,0 +1,124 @@
+FROM archlinux:base-devel as base
+
+ARG VIPS_VERSION=8.10.6
+ARG VIPS_URL=https://github.com/libvips/libvips/releases/download
+
+RUN echo "Server = https://mirror.osbeck.com/archlinux/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist && \
+	sed -i -e 's~#IgnorePkg.*~IgnorePkg = filesystem~g' '/etc/pacman.conf'
+
+RUN \
+	pacman -Sy --noconfirm \
+	cfitsio \
+	fftw \
+	imagemagick \
+	lcms2 \
+	libexif \
+	libgsf \
+	libimagequant \
+	libjpeg-turbo \
+	libpng \
+	librsvg \
+	libtiff \
+	libwebp \
+	openexr \
+	orc \
+	pango \
+	poppler-glib \
+	libde265 \
+	x265 \
+	cmake \
+	ninja \
+	doxygen \
+	git \
+	yasm
+
+WORKDIR /tmp/
+
+FROM base as aom
+RUN curl https://raw.githubusercontent.com/archlinux/svntogit-packages/packages/aom/trunk/PKGBUILD -sLO
+RUN \
+	sed -i 's#pkgver=2.0.2#pkgver=3.0.0#' PKGBUILD && \
+	sed -i 's#cb1d48da8da2061e72018761788a18b8fa8013bb#307ce06ed82d93885ee8ed53e152c9268ac0d98d#' PKGBUILD && \
+	sudo -u nobody makepkg --noconfirm
+
+FROM base as libheif
+COPY --from=aom /tmp/*.zst /tmp/
+RUN pacman -U /tmp/*.zst --noconfirm
+RUN curl https://raw.githubusercontent.com/archlinux/svntogit-packages/packages/libheif/trunk/PKGBUILD -sLO
+RUN \
+	sed -i 's#make$#make -j6#' PKGBUILD && \
+	sudo -u nobody makepkg --noconfirm
+
+FROM base as libvips
+COPY --from=libheif /tmp/*.zst /tmp/
+RUN pacman -U /tmp/*.zst --noconfirm
+RUN curl -sLO https://raw.githubusercontent.com/archlinux/svntogit-community/packages/libvips/trunk/PKGBUILD && \
+	sed -i 's#8.10.3#8.10.6#' PKGBUILD && sed -i "s#'pango' ##" PKGBUILD && \
+	sed -i 's#configure#configure --disable-debug --disable-dependency-tracking --disable-introspection --disable-static --enable-gtk-doc-html=no --enable-gtk-doc=no --enable-pyvips8=no#' PKGBUILD && \
+	sed -i 's#make$#make -j4#' PKGBUILD && \
+	sed -i \
+	's#f337717e30dcd5bf8efe089ab5579af0938e0172c9aa87ab03120ea838378e3cf5ca6477d4f32f5eeeed56fe8e6e0ab8091c7bb5fe2be07a8bfa545aa15271c7#e3e623ad7b44dfb65078c49d2694d94bb11294300630d9e3c53ff1f9e9aaf58d196881d52c191b4604d9f63453199b7da3601425ffc9554f1c25cf08d630ef8b#' \
+	PKGBUILD
+RUN sudo -u nobody makepkg --noconfirm
+
+FROM base as imaginary
+COPY --from=libvips /tmp/*.zst /tmp/
+
+RUN pacman -Sy --noconfirm go && \
+	pacman -U /tmp/*.zst --noconfirm
+
+ARG IMAGINARY_VERSION=dev
+ENV GO111MODULE=on
+ARG GOLANGCILINT_VERSION=1.36.0
+
+WORKDIR ${GOPATH}/src/github.com/h2non/
+RUN curl -fsSL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "${GOPATH}/bin" v${GOLANGCILINT_VERSION}
+
+WORKDIR ${GOPATH}/src/github.com/h2non/imaginary
+
+# Cache go modules
+ENV GO111MODULE=on
+
+COPY go.mod .
+COPY go.sum .
+
+RUN go mod download
+
+# Copy imaginary sources
+COPY . .
+
+RUN go test -v -race -covermode=atomic .
+RUN golangci-lint run .
+
+RUN go build -a \
+	-o /go/bin/imaginary \
+	-ldflags="-s -w -h -X main.Version=${IMAGINARY_VERSION}" \
+	github.com/h2non/imaginary
+
+
+FROM archlinux:latest
+COPY --from=base /etc/pacman.conf /etc/pacman.conf
+COPY --from=base /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist
+COPY --from=base /etc/ssl/certs /etc/ssl/certs
+COPY --from=imaginary /tmp/*.zst /tmp/
+COPY --from=imaginary /go/bin/imaginary /usr/local/bin/imaginary
+
+ARG IMAGINARY_VERSION
+
+LABEL maintainer="tomas@aparicio.me" \
+	org.label-schema.description="Fast, simple, scalable HTTP microservice for high-level image processing with first-class Docker support" \
+	org.label-schema.schema-version="1.0" \
+	org.label-schema.url="https://github.com/h2non/imaginary" \
+	org.label-schema.vcs-url="https://github.com/h2non/imaginary" \
+	org.label-schema.version="${IMAGINARY_VERSION}"
+
+RUN	\
+	pacman -Sy --noconfirm && \
+	pacman -U /tmp/*.zst --noconfirm && \
+	yes | pacman -Scc && \
+	rm /tmp/*.zst
+
+ENV PORT 9000
+USER nobody
+ENTRYPOINT ["/usr/local/bin/imaginary"]
+EXPOSE ${PORT}
